@@ -10,6 +10,7 @@ angular
 
         $scope.graph = graph.graph;
         $scope.graphService = graph;
+        $scope.styles = graph.graph.style;
 
         $scope.graphRendered = function(graph_element) {
             graph.setGraphReady(graph_element);
