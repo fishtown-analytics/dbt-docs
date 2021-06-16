@@ -3,6 +3,8 @@ const angular = require('angular');
 const $ = require('jquery');
 const _ = require('lodash');
 
+import Fuse from 'fuse.js';
+
 import merge from 'deepmerge';
 
 angular
@@ -22,6 +24,7 @@ angular
             manifest: {},
             catalog: {},
         },
+        fuse: {},
         loaded: $q.defer(),
     }
 
@@ -145,7 +148,6 @@ angular
 
             var models = project.nodes
             var model_names = _.keyBy(models, 'name');
-
             var tests = _.filter(project.nodes, {resource_type: 'test'})
             _.each(tests, function(test) {
 
@@ -225,10 +227,33 @@ angular
                 return _.includes(['model', 'source', 'seed', 'snapshot', 'analysis', 'exposure'], node.resource_type);
             });
 
-            service.project.searchable = _.filter(search_nodes.concat(search_macros), function(obj) {
+            service.project.searchable = prepareModelsForSearching(_.filter(search_nodes.concat(search_macros), function(obj) {
                 // It should not be possible to search for hidden documentation
                 return !obj.docs || obj.docs.show;
-            });
+            }));
+
+			const fuseOptions = {
+			  includeScore: true,
+			  includeMatches: true,
+			  ignoreLocation: true,
+			  threshold: 0.4,
+			  //useExtendedSearch: true,
+			  keys: [
+			  	{name: 'searchableName', weight: 20},
+			  	{name: 'tags', weight: 5},
+			  	{name: 'description', weight: 2},
+			  	{name: 'columns.tags', weight: 3},
+			  	{name: 'columns.name', weight: 2},
+			  	{name: 'columns.description', weight: 1},
+			  	{name: 'raw_sql', weight: 1}
+			  ],
+			}
+			
+			service.fuse = new Fuse(
+				service.project.searchable, 
+				fuseOptions
+			);
+
             service.loaded.resolve();
         });
     }
@@ -239,43 +264,8 @@ angular
         });
     }
 
-    function fuzzySearchObj(val, obj) {
-        var objects = [];
-        var search_keys = {
-            'name':'string',
-            'description':'string',
-            'raw_sql':'string',
-            'columns':'object',
-            'tags': 'array',
-            'arguments': 'array',
-        };
-        var search = new RegExp(val, "i")
-
-        for (var i in search_keys) {
-            if (!obj[i]) {
-               continue;
-            } else if (search_keys[i] === 'string' && obj[i].toLowerCase().indexOf(val.toLowerCase()) != -1) {
-                objects.push({key: i, value: val});
-            } else if (search_keys[i] === 'object') {
-                for (var column_name in obj[i]) {
-                    if (obj[i][column_name]["name"].toLowerCase().indexOf(val.toLowerCase()) != -1) {
-                        objects.push({key: i, value: val});
-                    }
-                }
-            } else if (search_keys[i] === 'array') {
-                for (var tag of obj[i]) {
-                    if (JSON.stringify(tag).toLowerCase().indexOf(val.toLowerCase()) != -1) {
-                        objects.push({key: i, value: val});
-                    }
-                }
-            }
-        }
-
-        return objects
-    }
-
-    service.search = function(q) {
-        if (q.length == 0) {
+    service.search = function(searchTerm) {
+        if (searchTerm.length == 0) {
             return _.map(service.project.searchable, function(model) {
                 return {
                     model: model,
@@ -284,18 +274,49 @@ angular
             })
         }
 
-        var res = [];
-        _.each(service.project.searchable, function(model) {
-            var matches = fuzzySearchObj(q, model);
-            if (matches.length) {
-                res.push({
-                    model: model,
-                    matches: matches,
-                });
-            }
-        });
-        return res;
+		try {
+			//As search terms become longer, be less tolerant of tiny fuzzy matches
+			var shortestWord = searchTerm.split(' ').sort(function(a, b){ return a.length - b.length})[0]
+			service.fuse.options.minMatchCharLength = Math.max(1, shortestWord.length - 2);
+			
+			const result = service.fuse.search(searchTerm)
+			
+			return _.map(result, function(res) {
+				return {
+					model: res.item,
+					matches: res.matches,
+					overallWeight: res.score
+				}
+			});
+		}
+		catch (e) {
+			console.error(`Error searching with fuse: ${e}`);
+		}
     }
+    
+    function prepareModelsForSearching(models) {
+    	//To tell fuse which fields to search, 
+    	//columns needs to be an array to avoid 
+    	//naming each object individually.
+    	var modelList = _.map(models, function(model) {
+		  // make a copy
+		  var newModel = _.assign({}, model);
+		  newModel.columns = _.values(model.columns);
+		  newModel.searchableName = getModelName(model);
+		  return newModel;
+		});
+		return modelList;
+    }
+    
+	function getModelName(model) {
+		if (model.resource_type == 'source') {
+			return model.source_name + "." + model.name;
+		} else if (model.resource_type == 'macro') {
+			return model.package_name + "." + model.name;
+		} else {
+			return model.name;
+		}
+	}
 
     function clean_project_macros(macros, adapter) {
         var all_macros = macros || [];
